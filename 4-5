@@ -1,0 +1,437 @@
+домен: `s24.lab`
+* сервер пошти: `mail.s24.lab` (IP 192.168.10.10)
+* користувач: `user1@s24.lab` (системний юзер `user1`)
+
+---
+
+# Завдання 4
+
+**«Встановити Postfix + Dovecot з базовими налаштуваннями безпеки та логування, налаштувати POP3S, SMTPS. Продемонструвати роботу клієнта Thunderbird з цим сервером.»**
+
+## 1. Встановлення пакетів
+
+```bash
+sudo apt update
+sudo apt install postfix dovecot-core dovecot-pop3d openssl -y
+```
+
+При встановленні Postfix:
+
+* обираєш тип: **Internet Site**
+* `mail name`: `s24.lab`
+
+Переконуємось, що служби є:
+
+```bash
+systemctl status postfix
+systemctl status dovecot
+```
+
+---
+
+## 2. Створити користувача для пошти (Maildir)
+
+```bash
+sudo adduser user1
+sudo -u user1 maildirmake.dovecot ~/Maildir
+sudo -u user1 maildirmake.dovecot ~/Maildir/.Sent
+sudo -u user1 maildirmake.dovecot ~/Maildir/.Trash
+```
+
+---
+
+## 3. Сертифікат для TLS (можна окремий для пошти)
+
+```bash
+sudo mkdir -p /etc/ssl/mail
+sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+  -keyout /etc/ssl/mail/mail.key \
+  -out   /etc/ssl/mail/mail.crt \
+  -subj "/C=UA/ST=Kyiv/L=Kyiv/O=Lab/OU=Mail/CN=mail.s24.lab"
+sudo chmod 600 /etc/ssl/mail/mail.key
+```
+
+---
+
+## 4. Налаштування Postfix (`/etc/postfix/main.cf`)
+
+```bash
+sudo nano /etc/postfix/main.cf
+```
+
+Основні параметри (допиши/поправ):
+
+```conf
+myhostname = mail.s24.lab
+mydomain   = s24.lab
+myorigin   = $mydomain
+inet_interfaces = all
+mydestination = $myhostname, localhost.$mydomain, localhost, $mydomain
+
+# Формат зберігання пошти
+home_mailbox = Maildir/
+
+# Обмеження (мінімальна безпека)
+smtpd_helo_required = yes
+disable_vrfy_command = yes
+smtpd_recipient_restrictions =
+    permit_mynetworks,
+    reject_unauth_destination
+
+# TLS для smtpd (SMTPS/Submission)
+smtpd_tls_cert_file = /etc/ssl/mail/mail.crt
+smtpd_tls_key_file  = /etc/ssl/mail/mail.key
+smtpd_use_tls = yes
+smtpd_tls_loglevel = 1
+smtpd_tls_auth_only = yes
+
+# Логування
+maillog_file = /var/log/mail.log
+```
+
+Зберегти.
+
+---
+
+## 5. Увімкнути SMTPS (465) у `master.cf`
+
+```bash
+sudo nano /etc/postfix/master.cf
+```
+
+Додай / розкоментуй блок:
+
+```conf
+smtps     inet  n       -       y       -       -       smtpd
+  -o smtpd_tls_wrappermode=yes
+  -o smtpd_sasl_auth_enable=yes
+  -o smtpd_client_restrictions=permit_sasl_authenticated,reject
+```
+
+(За потреби можна додатково налаштувати sasl, для лаби часто вистачає авторизації по системних акаунтах через dovecot SASL – але якщо викладач не вимагає, можеш тестувати без авторизації в межах локальної мережі.)
+
+Перезавантажити Postfix:
+
+```bash
+sudo systemctl restart postfix
+sudo systemctl status postfix
+```
+
+---
+
+## 6. Налаштування Dovecot (POP3S)
+
+### 6.1. Загальні параметри (`/etc/dovecot/dovecot.conf`)
+
+```bash
+sudo nano /etc/dovecot/dovecot.conf
+```
+
+Переконайся, що є:
+
+```conf
+protocols = pop3
+```
+
+(Якщо ще й IMAP треба – `protocols = pop3 imap`.)
+
+### 6.2. Розташування пошти (`10-mail.conf`)
+
+```bash
+sudo nano /etc/dovecot/conf.d/10-mail.conf
+```
+
+Знайди й встанови:
+
+```conf
+mail_location = maildir:~/Maildir
+```
+
+---
+
+### 6.3. SSL (`10-ssl.conf`)
+
+```bash
+sudo nano /etc/dovecot/conf.d/10-ssl.conf
+```
+
+Основні опції:
+
+```conf
+ssl = required
+ssl_cert = </etc/ssl/mail/mail.crt
+ssl_key  = </etc/ssl/mail/mail.key
+```
+
+---
+
+### 6.4. Автентифікація (`10-auth.conf`)
+
+```bash
+sudo nano /etc/dovecot/conf.d/10-auth.conf
+```
+
+Постав:
+
+```conf
+disable_plaintext_auth = yes
+auth_mechanisms = plain login
+```
+
+(plain/login дозволені **тільки через TLS**, бо `ssl = required`.)
+
+Перезапуск Dovecot:
+
+```bash
+sudo systemctl restart dovecot
+sudo systemctl status dovecot
+```
+
+---
+
+## 7. Перевірка POP3S і SMTPS з сервера
+
+```bash
+# POP3S
+openssl s_client -connect 127.0.0.1:995 -quiet
+# має показати сертифікат і банер Dovecot
+
+# SMTPS
+openssl s_client -connect 127.0.0.1:465 -quiet
+# має показати сертифікат і банер Postfix
+```
+
+Вийти з `Ctrl+C`.
+
+---
+
+## 8. Thunderbird (що вказати в клієнті)
+
+На клієнті (з якого тестуєш):
+
+1. У `/etc/hosts` (або DNS) — щоб `mail.s24.lab` вказував на IP сервера.
+2. У Thunderbird → **Create new account → Existing Mail**:
+
+   * Name: будь-яке;
+   * Email: `user1@s24.lab`;
+   * Password: пароль користувача `user1`.
+
+Manual config:
+
+* Incoming:
+
+  * Protocol: **POP3**
+  * Server: `mail.s24.lab`
+  * Port: `995`
+  * Connection security: **SSL/TLS**
+  * Authentication: **Normal password**
+* Outgoing:
+
+  * Server: `mail.s24.lab`
+  * Port: `465`
+  * Connection security: **SSL/TLS**
+  * Authentication: **Normal password**
+  * Username: `user1`
+
+Після збереження:
+
+* Надсилаєш листа самому собі (`user1@s24.lab` → `user1@s24.lab`),
+* Забираєш пошту POP3S – лист має з’явитись.
+
+Логи:
+
+```bash
+sudo tail -n 50 /var/log/mail.log
+```
+
+---
+
+# Завдання 5
+
+**«Встановити Postfix + Dovecot з базовими налаштуваннями безпеки та логування, налаштувати DKIM. Продемонструвати роботу клієнта Thunderbird з цим сервером.»**
+
+Будемо використовувати вже налаштований сервер з Завдання 4. Додаємо **OpenDKIM**.
+
+## 1. Встановити OpenDKIM
+
+```bash
+sudo apt update
+sudo apt install opendkim opendkim-tools -y
+```
+
+---
+
+## 2. Налаштування `/etc/opendkim.conf`
+
+```bash
+sudo nano /etc/opendkim.conf
+```
+
+Основне (мінімально необхідне):
+
+```conf
+Syslog                  yes
+UMask                   002
+
+Canonicalization        relaxed/simple
+Mode                    sv
+SubDomains              yes
+
+KeyTable                /etc/opendkim/KeyTable
+SigningTable            /etc/opendkim/SigningTable
+TrustedHosts            /etc/opendkim/TrustedHosts
+
+Socket                  inet:8891@localhost
+```
+
+Зберегти.
+
+---
+
+## 3. Файли KeyTable / SigningTable / TrustedHosts
+
+```bash
+sudo mkdir -p /etc/opendkim/keys/s24.lab
+sudo nano /etc/opendkim/TrustedHosts
+```
+
+Вміст `TrustedHosts`:
+
+```text
+127.0.0.1
+localhost
+192.168.10.10
+s24.lab
+mail.s24.lab
+```
+
+`KeyTable`:
+
+```bash
+sudo nano /etc/opendkim/KeyTable
+```
+
+```text
+mail._domainkey.s24.lab s24.lab:mail:/etc/opendkim/keys/s24.lab/mail.private
+```
+
+`SigningTable`:
+
+```bash
+sudo nano /etc/opendkim/SigningTable
+```
+
+```text
+*@s24.lab mail._domainkey.s24.lab
+```
+
+---
+
+## 4. Згенерувати DKIM-ключ
+
+```bash
+cd /etc/opendkim/keys/s24.lab
+sudo opendkim-genkey -s mail -d s24.lab
+sudo chown opendkim:opendkim mail.private mail.txt
+sudo chmod 600 mail.private
+```
+
+Файл `mail.private` – ключ, який використовує OpenDKIM.
+Файл `mail.txt` – приклад DNS-запису.
+
+---
+
+## 5. DNS-запис DKIM
+
+У файлі `mail.txt` щось типу:
+
+```text
+mail._domainkey IN TXT "v=DKIM1; k=rsa; p=...."
+```
+
+Цей TXT-запис потрібно додати у DNS-зону `s24.lab` (у твоєму BIND):
+
+```conf
+mail._domainkey      IN TXT  "v=DKIM1; k=rsa; p=..."
+```
+
+(Все, що між лапками з `mail.txt`, переносиш у зону.)
+
+Після редагування – `named-checkzone` і `systemctl reload bind9`.
+
+---
+
+## 6. Підключити OpenDKIM до Postfix
+
+### 6.1. `/etc/default/opendkim`
+
+```bash
+sudo nano /etc/default/opendkim
+```
+
+Переконайся, що:
+
+```conf
+SOCKET="inet:8891@localhost"
+```
+
+### 6.2. Додати milter у Postfix (`main.cf`)
+
+```bash
+sudo nano /etc/postfix/main.cf
+```
+
+Додай:
+
+```conf
+milter_default_action = accept
+milter_protocol       = 2
+smtpd_milters         = inet:localhost:8891
+non_smtpd_milters     = inet:localhost:8891
+```
+
+Зберегти.
+
+Перезапуск:
+
+```bash
+sudo systemctl restart opendkim
+sudo systemctl restart postfix
+sudo systemctl status opendkim
+sudo systemctl status postfix
+```
+
+---
+
+## 7. Перевірка ключа з боку сервера
+
+```bash
+sudo opendkim-testkey -d s24.lab -s mail -vvv
+```
+
+Якщо DNS-запис правильний, побачиш щось типу `key OK`.
+
+---
+
+## 8. Тест через Thunderbird
+
+Thunderbird-конфіг **той самий**, що в завданні 4 (POP3S/SMTPS).
+
+1. Надішли лист із `user1@s24.lab` на зовнішню адресу (якщо в тебе є вихід в Інтернет і MX / релеї).
+   У лабораторії можна надіслати на інший свій сервер, де можна подивитись заголовки.
+2. У заголовках листа шукай рядки:
+
+```text
+DKIM-Signature: ...
+Authentication-Results: ... dkim=pass ...
+```
+
+У локальній лабі без Інтернету можна хоча б перевірити, що Postfix додає заголовок `DKIM-Signature:` у вихідні листи (надіславши листа самому собі всередині домену).
+
+Логи:
+
+```bash
+sudo tail -n 50 /var/log/mail.log
+```
+
+Там мають бути записи від `opendkim` про підпис повідомлень.

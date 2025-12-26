@@ -1,0 +1,256 @@
+## 1. Налаштування політики паролів через PowerShell
+
+### 1.1. Запуск PowerShell від імені адміністратора домену
+
+1. На контролері домену натискаєш **Start → All Programs → Accessories → Windows PowerShell**.
+2. Клацаєш по **Windows PowerShell** правою кнопкою миші → **Run as administrator**.
+3. Якщо з’являється UAC – натискаєш **Yes**.
+
+**Навіщо:** потрібні права адміністратора домену, інакше змінити доменну політику паролів не вийде.
+
+---
+
+### 1.2. Підключення модуля ActiveDirectory
+
+У вікні PowerShell вводиш:
+
+```powershell
+Import-Module ActiveDirectory
+```
+
+Enter.
+
+Якщо помилок немає – модуль підключено.
+
+**Навіщо:** цей модуль дає командлети `Get-ADDefaultDomainPasswordPolicy` і `Set-ADDefaultDomainPasswordPolicy`.
+
+---
+
+### 1.3. Подивитися поточну політику паролів домену
+
+```powershell
+Get-ADDefaultDomainPasswordPolicy
+```
+
+Переглядаєш значення:
+
+* `MinPasswordLength`
+* `MaxPasswordAge`
+* `PasswordHistoryCount`
+* `ComplexityEnabled`
+* `LockoutThreshold`
+* `LockoutDuration`
+* `LockoutObservationWindow`
+
+Можеш зробити скрін для «до змін».
+
+**Навіщо:** бачимо стартові значення, щоб показати, що потім вони змінилися.
+
+---
+
+### 1.4. Встановити політику паролів згідно з PCI DSS
+
+У тому ж PowerShell вводиш (підстав свій домен замість `s24.local`, якщо інший):
+
+```powershell
+Set-ADDefaultDomainPasswordPolicy `
+    -Identity "s24.local" `
+    -MinPasswordLength 7 `
+    -PasswordHistoryCount 4 `
+    -MaxPasswordAge (New-TimeSpan -Days 90) `
+    -ComplexityEnabled $true `
+    -LockoutThreshold 6 `
+    -LockoutDuration (New-TimeSpan -Minutes 30) `
+    -LockoutObservationWindow (New-TimeSpan -Minutes 30)
+```
+
+Enter, чекаєш виконання без помилки.
+
+Пояснення ключових параметрів (можеш вставити в пояснення до звіту):
+
+* `MinPasswordLength 7` – мінімум 7 символів (вимога PCI).
+* `PasswordHistoryCount 4` – не можна повторити будь-який із останніх 4 паролів.
+* `MaxPasswordAge 90 днів` – змушує користувачів міняти пароль не рідше ніж раз на 90 днів.
+* `ComplexityEnabled $true` – вмикає складність (мінімум 3 категорії символів: великі, малі, цифри, спецсимволи).
+* `LockoutThreshold 6` – блокування облікового запису після 6 невдалих логінів.
+* `LockoutDuration 30 хвилин` – тривалість блокування 30 хв.
+* `LockoutObservationWindow 30 хвилин` – лічильник невдалих спроб очищується через 30 хвилин.
+
+---
+
+### 1.5. Перевірити, що політика змінилася
+
+Ще раз виконуєш:
+
+```powershell
+Get-ADDefaultDomainPasswordPolicy
+```
+
+Перевіряєш, що:
+
+* `MinPasswordLength` = 7
+* `PasswordHistoryCount` = 4
+* `MaxPasswordAge` ≈ `90.00:00:00`
+* `ComplexityEnabled` = True
+* `LockoutThreshold` = 6
+* `LockoutDuration` = `00:30:00`
+* `LockoutObservationWindow` = `00:30:00`
+
+Робиш скрін – це доказ, що через PowerShell політика змінена.
+
+**Навіщо:** показує, що командлет реально записав нові значення в доменну політику.
+
+---
+
+## 2. Налаштування й перевірка через Group Policy (GPO)
+
+Тут ми фактично подивимося й при потребі відкоригуємо ті ж самі параметри через графічну консоль, як вимагає завдання.
+
+### 2.1. Відкрити Group Policy Management Console
+
+1. На контролері домену натискаєш **Start → Administrative Tools → Group Policy Management**.
+   Або **Start → Run** → вводиш `gpmc.msc` → **OK**.
+
+**Навіщо:** це основна консоль для керування доменними GPO.
+
+---
+
+### 2.2. Відкрити редагування Default Domain Policy
+
+1. У лівому дереві розкриваєш:
+   **Forest: <твой_ліс> → Domains → s24.local**.
+2. Знаходиш політику **Default Domain Policy**.
+3. Клацаєш по ній **правою кнопкою** → **Edit**.
+
+**Навіщо:** саме ця політика задає «Account Policies» для всього домену (її налаштування відповідають тому, що ми тільки-но міняли через PowerShell).
+
+---
+
+### 2.3. Password Policy у GPO
+
+У вікні **Group Policy Management Editor** переходиш:
+
+`Computer Configuration → Policies → Windows Settings → Security Settings → Account Policies → Password Policy`
+
+Далі по черзі:
+
+1. **Enforce password history**
+
+   * Двічі клацаєш.
+   * Ставиш галочку **Define this policy setting**.
+   * У полі **Passwords remembered** вводиш `4`.
+   * Натискаєш **OK**.
+
+2. **Maximum password age**
+
+   * Двічі клацаєш.
+   * **Define this policy setting**.
+   * Вводиш `90` днів → **OK**.
+
+3. **Minimum password length**
+
+   * Двічі клацаєш.
+   * **Define this policy setting**.
+   * Вводиш `7` → **OK**.
+
+4. **Password must meet complexity requirements**
+
+   * Двічі клацаєш.
+   * Встановлюєш **Enabled** → **OK**.
+
+(За бажанням: **Minimum password age** можна поставити, наприклад, `1` день).
+
+**Навіщо:** цими параметрами в графіці ми підтверджуємо/доуточнюємо те, що зробили через PowerShell. Default Domain Policy тепер зберігає історію, змушує змінювати пароль і вимагає складності.
+
+---
+
+### 2.4. Account Lockout Policy у GPO
+
+У тому ж редакторі переходиш:
+
+`Computer Configuration → Policies → Windows Settings → Security Settings → Account Policies → Account Lockout Policy`
+
+І налаштовуєш:
+
+1. **Account lockout threshold**
+
+   * Двічі клацаєш.
+   * **Define this policy setting**.
+   * Вводиш `6` → **OK**.
+   * З’явиться вікно з пропозиціями для інших параметрів – погоджуєшся, а потім змінюєш їх явно.
+
+2. **Account lockout duration**
+
+   * Двічі клацаєш.
+   * **Define this policy setting**.
+   * Вводиш `30` хв → **OK**.
+
+3. **Reset account lockout counter after**
+
+   * Двічі клацаєш.
+   * **Define this policy setting**.
+   * Вводиш `30` хв → **OK**.
+
+**Навіщо:** забезпечує вимоги PCI щодо блокування облікових записів після N невдалих спроб та часу блокування.
+
+Можеш зробити кілька скрінів з цими вікнами.
+
+---
+
+### 2.5. Примусове оновлення політик на контролері
+
+На контролері домену відкриваєш **cmd** і вводиш:
+
+```cmd
+gpupdate /force
+```
+
+**Навіщо:** оновлюємо GPO одразу, щоб не чекати автоматичного оновлення.
+
+---
+
+## 3. Перевірка застосування політики на клієнтському ПК
+
+### 3.1. Оновити політики на клієнті
+
+На клієнті Windows 7:
+
+1. Відкриваєш **cmd** від імені адміністратора.
+2. Виконуєш:
+
+```cmd
+gpupdate /force
+```
+
+**Навіщо:** стягуємо нову Default Domain Policy з контролера домену.
+
+---
+
+### 3.2. Перевірити, що саме ця політика застосована
+
+Варіант 1 – команда:
+
+```cmd
+gpresult /r
+```
+
+* У розділі **Applied Group Policy Objects** повинна бути **Default Domain Policy**.
+
+Варіант 2 – графіка (зручно для скрінів):
+
+1. **Start → Run →** `rsop.msc` → **OK**.
+2. У вікні **Resultant Set of Policy** (RSoP) переходиш:
+
+   * `Computer Configuration → Windows Settings → Security Settings → Account Policies → Password Policy`
+   * `... → Account Lockout Policy`.
+
+Перевіряєш, що значення там:
+
+* Min password length = 7
+* Max password age = 90
+* Enforce password history = 4
+* Password must meet complexity = Enabled
+* Account lockout threshold = 6
+* Account lockout duration = 30 min
+* Reset account lockout counter after = 30 min
+

@@ -1,0 +1,452 @@
+ домен: `s24.lab`
+* піддомен: `sub.s24.lab`
+* мережа: `192.168.10.0/24`
+* IP DNS-сервера: `192.168.10.10`
+
+Ти можеш у звіті замінити на свої.
+
+---
+
+# Завдання 1
+
+**“Встановити Bind9 з базовими налаштуваннями безпеки (включаючи ACL) та логуванням, з субдоменом та прямою і зворотною зоною. Обов’язкові ресурсні записи: MX, CNAME, TXT, SRV.”**
+
+## 1. Встановлення BIND9
+
+```bash
+sudo apt update
+sudo apt install bind9 bind9utils bind9-doc -y
+```
+
+Перевіряємо, що служба запущена:
+
+```bash
+systemctl status bind9
+```
+
+---
+
+## 2. Базовий конфіг `named.conf.options` (ACL + безпека + recursion)
+
+Редагуємо:
+
+```bash
+sudo nano /etc/bind/named.conf.options
+```
+
+Всередині робимо так (приклад):
+
+```conf
+options {
+        directory "/var/cache/bind";
+
+        // Список довірених клієнтів
+        acl "trusted" {
+                127.0.0.1;          // localhost
+                192.168.10.0/24;    // твоя локальна мережа
+        };
+
+        // Слухаємо тільки свій інтерфейс
+        listen-on { 127.0.0.1; 192.168.10.10; };
+        listen-on-v6 { none; };
+
+        // Хто може робити рекурсивні запити
+        allow-query     { trusted; };
+        allow-recursion { trusted; };
+
+        // Заборонити відповідати на запити ззовні
+        allow-query-cache { trusted; };
+
+        dnssec-validation yes;
+        auth-nxdomain no;
+        recursion yes;
+};
+```
+
+Зберігаємо файл.
+
+Перевіряємо синтаксис:
+
+```bash
+sudo named-checkconf
+```
+
+---
+
+## 3. Налаштування логування BIND
+
+Створюємо каталог:
+
+```bash
+sudo mkdir /var/log/named
+sudo chown bind:bind /var/log/named
+sudo chmod 750 /var/log/named
+```
+
+Відкриваємо основний конфіг:
+
+```bash
+sudo nano /etc/bind/named.conf
+```
+
+В кінець файлу додаємо блок `logging` (якщо його ще немає):
+
+```conf
+logging {
+        channel default_log {
+                file "/var/log/named/named.log" versions 5 size 10m;
+                severity info;
+                print-time yes;
+                print-severity yes;
+                print-category yes;
+        };
+
+        category default { default_log; };
+        category queries { default_log; };
+        category security { default_log; };
+};
+```
+
+Зберігаємо, перевіряємо:
+
+```bash
+sudo named-checkconf
+```
+
+---
+
+## 4. Оголошення зон: пряма, зворотна і піддомен
+
+Відкриваємо:
+
+```bash
+sudo nano /etc/bind/named.conf.local
+```
+
+Додаємо:
+
+```conf
+// Пряма зона для s24.lab
+zone "s24.lab" {
+        type master;
+        file "/etc/bind/db.s24.lab";
+        allow-query { any; };
+};
+
+// Зворотна зона для 192.168.10.0/24
+zone "10.168.192.in-addr.arpa" {
+        type master;
+        file "/etc/bind/db.10.168.192";
+        allow-query { any; };
+};
+
+// Піддомен sub.s24.lab (окрема зона)
+zone "sub.s24.lab" {
+        type master;
+        file "/etc/bind/db.sub.s24.lab";
+        allow-query { any; };
+};
+```
+
+Зберігаємо.
+
+---
+
+## 5. Файл прямої зони `s24.lab` (A, MX, CNAME, TXT, SRV)
+
+Створюємо на основі шаблону:
+
+```bash
+sudo cp /etc/bind/db.local /etc/bind/db.s24.lab
+sudo nano /etc/bind/db.s24.lab
+```
+
+Вміст (пристосуй `serial` під себе):
+
+```conf
+$TTL    86400
+@       IN      SOA     ns1.s24.lab. admin.s24.lab. (
+                        2025122601  ; Serial
+                        3600        ; Refresh
+                        1800        ; Retry
+                        604800      ; Expire
+                        86400 )     ; Minimum
+
+; NS
+        IN      NS      ns1.s24.lab.
+
+; Хости
+ns1     IN      A       192.168.10.10
+server  IN      A       192.168.10.20
+mail    IN      A       192.168.10.30
+www     IN      A       192.168.10.40
+
+; MX — поштовий сервер
+@       IN      MX 10   mail.s24.lab.
+
+; CNAME — псевдонім
+web     IN      CNAME   www.s24.lab.
+
+; TXT — довільний текст (наприклад, SPF)
+@       IN      TXT     "v=spf1 mx -all"
+
+; SRV — наприклад, служба _sip._tcp
+_sip._tcp       IN SRV 10 60 5060 server.s24.lab.
+
+; делегуємо піддомен sub.s24.lab на той самий NS (для простоти)
+sub     IN      NS      ns1.s24.lab.
+```
+
+---
+
+## 6A. Файл зони піддомену `sub.s24.lab`
+
+```bash
+sudo cp /etc/bind/db.local /etc/bind/db.sub.s24.lab
+sudo nano /etc/bind/db.sub.s24.lab
+```
+
+Приклад:
+
+```conf
+$TTL    86400
+@       IN      SOA     ns1.sub.s24.lab. admin.s24.lab. (
+                        2025122601
+                        3600
+                        1800
+                        604800
+                        86400 )
+
+        IN      NS      ns1.sub.s24.lab.
+
+ns1     IN      A       192.168.10.10
+app     IN      A       192.168.10.50
+```
+
+(Можеш залишити той самий NS, або окремий хост.)
+
+---
+
+## 6B. Файл зворотної зони `10.168.192.in-addr.arpa`
+
+```bash
+sudo cp /etc/bind/db.127 /etc/bind/db.10.168.192
+sudo nano /etc/bind/db.10.168.192
+```
+
+Вміст:
+
+```conf
+$TTL    86400
+@       IN      SOA     ns1.s24.lab. admin.s24.lab. (
+                        2025122601
+                        3600
+                        1800
+                        604800
+                        86400 )
+
+        IN      NS      ns1.s24.lab.
+
+10      IN      PTR     ns1.s24.lab.
+20      IN      PTR     server.s24.lab.
+30      IN      PTR     mail.s24.lab.
+40      IN      PTR     www.s24.lab.
+50      IN      PTR     app.sub.s24.lab.
+```
+
+(10 = останній октет IP 192.168.10.10 тощо.)
+
+---
+
+## 7. Перевірка зон та перезапуск BIND
+
+Перевіряємо:
+
+```bash
+sudo named-checkzone s24.lab /etc/bind/db.s24.lab
+sudo named-checkzone sub.s24.lab /etc/bind/db.sub.s24.lab
+sudo named-checkzone 10.168.192.in-addr.arpa /etc/bind/db.10.168.192
+sudo named-checkconf
+```
+
+Якщо помилок немає — рестарт:
+
+```bash
+sudo systemctl restart bind9
+sudo systemctl status bind9
+```
+
+---
+
+## 8. Тестування (на цьому ж сервері або клієнті з `dig`)
+
+```bash
+dig @192.168.10.10 s24.lab
+dig @192.168.10.10 ns1.s24.lab
+dig @192.168.10.10 www.s24.lab
+dig @192.168.10.10 web.s24.lab    ; CNAME
+dig @192.168.10.10 s24.lab MX
+dig @192.168.10.10 s24.lab TXT
+dig @192.168.10.10 _sip._tcp.s24.lab SRV
+dig @192.168.10.10 -x 192.168.10.30
+dig @192.168.10.10 app.sub.s24.lab
+```
+
+Якщо відповіді коректні — **Завдання 1 виконано**: є BIND9, ACL, логування, пряма/зворотна зона, піддомен, MX/CNAME/TXT/SRV.
+
+---
+
+# Завдання 2
+
+**“Встановити Bind9 з базовими налаштуваннями безпеки (включаючи ACL) та налаштувати DNSSEC.”**
+
+Тут можна взяти вже готовий BIND із Завдання 1 і додати до нього DNSSEC для авторитативної зони `s24.lab`.
+
+## 1. Переконатися, що BIND підтримує DNSSEC
+
+```bash
+named -V | grep -i dnssec
+```
+
+У виводі має бути `--enable-dnssec` або подібне. На Debian/Ubuntu зазвичай уже є.
+
+---
+
+## 2. Увімкнути DNSSEC у конфігурації
+
+У нас у `named.conf.options` уже було:
+
+```conf
+dnssec-validation yes;
+```
+
+Для авторитативної зони зручніше використовувати **inline-signing**. Додамо параметри в `named.conf.local` для зони `s24.lab`.
+
+Відкриваємо:
+
+```bash
+sudo nano /etc/bind/named.conf.local
+```
+
+Міняємо опис зони `s24.lab`:
+
+```conf
+zone "s24.lab" {
+        type master;
+        file "/etc/bind/db.s24.lab";
+        allow-query    { any; };
+        inline-signing yes;
+        auto-dnssec    maintain;
+};
+```
+
+Зберігаємо.
+
+---
+
+## 3. Створюємо ключі DNSSEC для зони
+
+Переходимо в каталог /etc/bind:
+
+```bash
+cd /etc/bind
+sudo dnssec-keygen -a RSASHA256 -b 2048 -n ZONE s24.lab
+sudo dnssec-keygen -f KSK -a RSASHA256 -b 2048 -n ZONE s24.lab
+```
+
+В результаті з’являться файли типу:
+
+* `Ks24.lab.+008+12345.key`
+* `Ks24.lab.+008+12345.private`
+* `Ks24.lab.+008+67890.key` (KSK)
+* `Ks24.lab.+008+67890.private`
+
+Права:
+
+```bash
+sudo chown bind:bind Ks24.lab.* 
+sudo chmod 640 Ks24.lab.*
+```
+
+**Навіщо:** це ключі підпису зони (ZSK і KSK). `auto-dnssec maintain` дозволить BIND автоматично підписати зону, якщо в каталозі є ключі.
+
+---
+
+## 4. Дозволяємо BIND писати у каталог зон
+
+Щоб inline-signing працював, BIND мусить мати можливість створювати `.signed`:
+
+```bash
+sudo chown bind:bind /etc/bind/db.s24.lab
+sudo chmod 640 /etc/bind/db.s24.lab
+```
+
+(У деяких гайдах радять винести файли зон у `/var/lib/bind`; для лаби достатньо змінити власника.)
+
+---
+
+## 5. Перезапуск BIND та підпис зони
+
+```bash
+sudo systemctl restart bind9
+sudo systemctl status bind9
+```
+
+Якщо все добре, через кілька секунд у `/etc/bind/` з’явиться файл `db.s24.lab.signed` — це підписана версія зони, яку BIND тепер буде роздавати.
+
+Перевіряємо:
+
+```bash
+ls /etc/bind/db.s24.lab*
+```
+
+---
+
+## 6. Перевірка зони з DNSSEC
+
+```bash
+sudo named-checkzone s24.lab /etc/bind/db.s24.lab.signed
+```
+
+(якщо inline-signing, можливо, треба вказати `.signed`; у багатьох системах `named-checkzone` працює і з базовим файлом, підписаним BIND’ом самостійно.)
+
+---
+
+## 7. Тестування DNSSEC з `dig`
+
+На клієнті або на самому сервері:
+
+### 7.1. Отримати DNSKEY
+
+```bash
+dig @192.168.10.10 s24.lab DNSKEY +dnssec
+```
+
+У відповіді повинні бути записи `DNSKEY` і додатковий запис `RRSIG`.
+
+### 7.2. Звичайний A-запис з прапором DNSSEC
+
+```bash
+dig @192.168.10.10 www.s24.lab A +dnssec
+```
+
+У секції ANSWER будеш бачити A та RRSIG.
+
+### 7.3. Перевірити, що AD-біт може бути встановлений (якщо клієнт довіряє ключам)
+
+Якщо ти робиш перевірку з іншого резольвера, що довіряє кореневим ключам, буде встановлений прапорець **ad** (Authenticated Data). В лабораторії зазвичай достатньо побачити RRSIG/DNSKEY.
+
+---
+
+## 8. Що написати у звіті по Завданню 2
+
+1. Показати, що BIND встановлений і захищений ACL’ами (це можна пере використати з Завдання 1).
+
+2. Описати:
+
+   * генерацію ключів `dnssec-keygen`;
+   * зміну зони на `inline-signing yes; auto-dnssec maintain;`;
+   * перезапуск і появу файлу `.signed`.
+
+3. Показати результати `dig +dnssec` (відповідь з RRSIG / DNSKEY).
+

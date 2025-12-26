@@ -1,0 +1,350 @@
+
+* DNS-імена для двох сайтів:
+
+  * `site1.local`
+  * `site2.local`
+* IP сервера: `192.168.10.10` (підстав свій, якщо інший).
+
+---
+
+## 0. Підготовка: hosts (щоб клієнт бачив домени)
+
+На **клієнті**, з якого будеш відкривати сайт (і на самому сервері для тесту):
+
+```bash
+sudo nano /etc/hosts
+```
+
+Додай рядок:
+
+```text
+192.168.10.10   site1.local site2.local
+```
+
+Зберегти.
+
+---
+
+## 1. Встановити Apache2
+
+```bash
+sudo apt update
+sudo apt install apache2 -y
+```
+
+Перевірка:
+
+```bash
+sudo systemctl status apache2
+```
+
+---
+
+## 2. Увімкнути потрібні модулі (SSL, headers, rewrite, статус)
+
+```bash
+sudo a2enmod ssl
+sudo a2enmod headers
+sudo a2enmod rewrite
+sudo a2enmod status
+```
+
+Потім перезапускаємо (або поки не перезапускай – далі все одно буде restart):
+
+```bash
+sudo systemctl restart apache2
+```
+
+---
+
+## 3. Створити каталоги двох сайтів і прості сторінки
+
+```bash
+sudo mkdir -p /var/www/site1.local/public_html
+sudo mkdir -p /var/www/site2.local/public_html
+```
+
+Права:
+
+```bash
+sudo chown -R www-data:www-data /var/www/site1.local /var/www/site2.local
+sudo chmod -R 750 /var/www/site1.local /var/www/site2.local
+```
+
+Створимо прості index-файли:
+
+```bash
+echo "<h1>Site1 over HTTPS</h1>" | sudo tee /var/www/site1.local/public_html/index.html
+echo "<h1>Site2 over HTTPS</h1>" | sudo tee /var/www/site2.local/public_html/index.html
+```
+
+---
+
+## 4. Базове «захардення» Apache (security.conf + логи)
+
+### 4.1. Глобальний security.conf
+
+```bash
+sudo nano /etc/apache2/conf-available/security.conf
+```
+
+Знайди й вистав:
+
+```conf
+ServerTokens Prod
+ServerSignature Off
+TraceEnable Off
+
+<Directory />
+    AllowOverride None
+    Options None
+    Require all denied
+</Directory>
+```
+
+(Якщо блок `<Directory />` вже є – поправ його, а не дублюй.)
+
+Зберегти. Увімкнути конфіг, якщо раніше не був:
+
+```bash
+sudo a2enconf security
+```
+
+---
+
+### 4.2. Базові налаштування логування
+
+У файлі `apache2.conf` зробимо власний формат логів:
+
+```bash
+sudo nano /etc/apache2/apache2.conf
+```
+
+Додай в кінець (якщо немає):
+
+```conf
+LogFormat "%h %l %u %t \"%r\" %>s %O \"%{Referer}i\" \"%{User-Agent}i\"" combined
+LogLevel info
+```
+
+(Зазвичай формат `combined` уже є, але так точно.)
+
+Зберегти.
+
+---
+
+## 5. Згенерувати самопідписані сертифікати для двох сайтів
+
+### 5.1. Каталог для ключів
+
+```bash
+sudo mkdir -p /etc/apache2/ssl
+sudo chmod 700 /etc/apache2/ssl
+```
+
+### 5.2. Сертифікат для site1.local
+
+```bash
+sudo openssl req -x509 -nodes -days 365 \
+  -newkey rsa:2048 \
+  -keyout /etc/apache2/ssl/site1.local.key \
+  -out /etc/apache2/ssl/site1.local.crt \
+  -subj "/C=UA/ST=Kyiv/L=Kyiv/O=Lab/OU=IT/CN=site1.local"
+```
+
+### 5.3. Сертифікат для site2.local
+
+```bash
+sudo openssl req -x509 -nodes -days 365 \
+  -newkey rsa:2048 \
+  -keyout /etc/apache2/ssl/site2.local.key \
+  -out /etc/apache2/ssl/site2.local.crt \
+  -subj "/C=UA/ST=Kyiv/L=Kyiv/O=Lab/OU=IT/CN=site2.local"
+```
+
+Закриємо ключі від читання «усім»:
+
+```bash
+sudo chmod 600 /etc/apache2/ssl/*.key
+```
+
+---
+
+## 6. HTTP-віртуальні хости (порт 80) – тільки редірект на HTTPS
+
+Створимо конфіг для site1:
+
+```bash
+sudo nano /etc/apache2/sites-available/site1-http.conf
+```
+
+Вміст:
+
+```conf
+<VirtualHost *:80>
+    ServerName site1.local
+
+    # Весь HTTP перенаправляємо на HTTPS
+    RewriteEngine On
+    RewriteRule ^/(.*)$ https://site1.local/$1 [R=301,L]
+
+    # Логування
+    ErrorLog ${APACHE_LOG_DIR}/site1_http_error.log
+    CustomLog ${APACHE_LOG_DIR}/site1_http_access.log combined
+</VirtualHost>
+```
+
+Для site2:
+
+```bash
+sudo nano /etc/apache2/sites-available/site2-http.conf
+```
+
+Вміст:
+
+```conf
+<VirtualHost *:80>
+    ServerName site2.local
+
+    RewriteEngine On
+    RewriteRule ^/(.*)$ https://site2.local/$1 [R=301,L]
+
+    ErrorLog ${APACHE_LOG_DIR}/site2_http_error.log
+    CustomLog ${APACHE_LOG_DIR}/site2_http_access.log combined
+</VirtualHost>
+```
+
+---
+
+## 7. HTTPS-віртуальні хости (порт 443) для двох сайтів
+
+### 7.1. site1.local
+
+```bash
+sudo nano /etc/apache2/sites-available/site1-https.conf
+```
+
+Вміст:
+
+```conf
+<VirtualHost *:443>
+    ServerName site1.local
+    DocumentRoot /var/www/site1.local/public_html
+
+    SSLEngine on
+    SSLCertificateFile      /etc/apache2/ssl/site1.local.crt
+    SSLCertificateKeyFile   /etc/apache2/ssl/site1.local.key
+
+    # Безпекові заголовки
+    Header always set X-Frame-Options "DENY"
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-XSS-Protection "1; mode=block"
+    Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains"
+
+    <Directory /var/www/site1.local/public_html>
+        Options -Indexes
+        AllowOverride None
+        Require all granted
+    </Directory>
+
+    ErrorLog ${APACHE_LOG_DIR}/site1_https_error.log
+    CustomLog ${APACHE_LOG_DIR}/site1_https_access.log combined
+</VirtualHost>
+```
+
+### 7.2. site2.local
+
+```bash
+sudo nano /etc/apache2/sites-available/site2-https.conf
+```
+
+Вміст:
+
+```conf
+<VirtualHost *:443>
+    ServerName site2.local
+    DocumentRoot /var/www/site2.local/public_html
+
+    SSLEngine on
+    SSLCertificateFile      /etc/apache2/ssl/site2.local.crt
+    SSLCertificateKeyFile   /etc/apache2/ssl/site2.local.key
+
+    Header always set X-Frame-Options "DENY"
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-XSS-Protection "1; mode=block"
+    Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains"
+
+    <Directory /var/www/site2.local/public_html>
+        Options -Indexes
+        AllowOverride None
+        Require all granted
+    </Directory>
+
+    ErrorLog ${APACHE_LOG_DIR}/site2_https_error.log
+    CustomLog ${APACHE_LOG_DIR}/site2_https_access.log combined
+</VirtualHost>
+```
+
+---
+
+## 8. Увімкнути сайти і SSL, відключити дефолтний сайт
+
+```bash
+# Вимикаємо стандартний 000-default
+sudo a2dissite 000-default.conf
+
+# Вмикаємо наші 4 конфіги
+sudo a2ensite site1-http.conf
+sudo a2ensite site2-http.conf
+sudo a2ensite site1-https.conf
+sudo a2ensite site2-https.conf
+```
+
+Перевіряємо синтаксис Apache:
+
+```bash
+sudo apache2ctl configtest
+```
+
+Якщо бачиш `Syntax OK`:
+
+```bash
+sudo systemctl restart apache2
+sudo systemctl status apache2
+```
+
+---
+
+## 9. Перевірка роботи
+
+На **сервері** або клієнті з `curl`:
+
+```bash
+curl -v http://site1.local/
+curl -vk https://site1.local/
+
+curl -v http://site2.local/
+curl -vk https://site2.local/
+```
+
+Очікування:
+
+* HTTP-запити (`http://`) повертають редірект 301 на `https://`.
+* HTTPS-запити показують HTML із `Site1 over HTTPS` / `Site2 over HTTPS`.
+  Браузер буде сваритися на самопідписаний сертифікат — це нормально для лаби.
+
+Логи можна подивитись:
+
+```bash
+ls /var/log/apache2/
+sudo tail -n 50 /var/log/apache2/site1_https_access.log
+sudo tail -n 50 /var/log/apache2/site2_https_access.log
+```
+
+---
+
+Таким чином виконано вимогу:
+
+* Apache2 з базовими налаштуваннями безпеки (ServerTokens Prod, ServerSignature Off, заборонені індекси та TRACE, security-headers, окремі DocumentRoot з правами).
+* Налаштоване логування (окремі журнали для кожного сайту, HTTP/HTTPS).
+* Триває HTTPS для **двох доменів** (`site1.local`, `site2.local`) із роздільними сертифікатами й віртуальними хостами.

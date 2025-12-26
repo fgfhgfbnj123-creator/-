@@ -1,0 +1,231 @@
+
+## 1. Двофакторна автентифікація (консоль + SSH) через Google Authenticator
+
+### 1.1. Встановити модуль
+
+```bash
+sudo apt update
+sudo apt install libpam-google-authenticator -y
+```
+
+### 1.2. Згенерувати секрет для користувача user13
+
+Переходимо від імені `user13`:
+
+```bash
+sudo -iu user13
+google-authenticator
+```
+
+Далі в діалозі:
+
+* `Do you want authentication tokens to be time-based?` → `y`
+* Записуєш секретний ключ / QR-код, зчитуєш його додатком Google Authenticator / FreeOTP.
+* На всі наступні питання для лаби можна відповісти `y`, крім rate-limit – як хочеш.
+
+Вийти назад до root:
+
+```bash
+exit
+```
+
+У `~user13/.google_authenticator` зберігся секрет.
+
+---
+
+### 1.3. Налаштувати PAM для SSH (`/etc/pam.d/sshd`)
+
+```bash
+sudo nano /etc/pam.d/sshd
+```
+
+На самому початку (після коментарів) додаємо рядок:
+
+```conf
+auth required pam_google_authenticator.so
+```
+
+Або, якщо хочеш, щоб 2FA було тільки тим, у кого є файл, додавай:
+
+```conf
+auth required pam_google_authenticator.so nullok
+```
+
+(для екзамену краще без `nullok`, тоді код обов’язковий).
+
+Файл зберегти.
+
+---
+
+### 1.4. Налаштувати PAM для консолі (`/etc/pam.d/login`)
+
+```bash
+sudo nano /etc/pam.d/login
+```
+
+Так само на початок секції `auth` додаємо:
+
+```conf
+auth required pam_google_authenticator.so
+```
+
+(або з `nullok`, якщо хочеш, але для завдання логічніше без).
+
+Зберегти.
+
+---
+
+### 1.5. Налаштування `sshd_config`
+
+```bash
+sudo nano /etc/ssh/sshd_config
+```
+
+Переконайся, що стоять такі опції (якщо рядок закоментований `#`, прибери `#` і зміни значення):
+
+```conf
+UsePAM yes
+ChallengeResponseAuthentication yes
+KbdInteractiveAuthentication yes
+PasswordAuthentication yes
+```
+
+(Так ми змушуємо sshd використовувати PAM і приймати keyboard-interactive, куди йде Google Authenticator.)
+
+Зберегти.
+
+Перезапустити SSH:
+
+```bash
+sudo systemctl restart ssh
+sudo systemctl status ssh
+```
+
+---
+
+### 1.6. Перевірка 2FA
+
+1. **Консоль (tty):**
+   Вийди з сесії, увійди як `user13`.
+   Послідовність буде така:
+
+   * спочатку пароль користувача;
+   * потім запит `Verification code:` (одноразовий код з додатку).
+
+2. **SSH:**
+
+   З іншої машини / з самої (через `ssh localhost`):
+
+   ```bash
+   ssh user13@IP_сервера
+   ```
+
+   Знову: спочатку пароль, потім `Verification code`.
+
+Якщо і там, і там вимагає OTP – частину з 2FA виконано.
+
+---
+
+## 2. Перенесення домашньої директорії user13 в `/test/user` і зробити її домашньою
+
+Найпростіше – використати `usermod -d -m`, який сам переміщує каталоги.
+
+### 2.1. Створити цільовий шлях
+
+```bash
+sudo mkdir -p /test/user
+```
+
+### 2.2. Перенести домашню директорію й оновити запис у /etc/passwd
+
+```bash
+sudo usermod -d /test/user -m user13
+```
+
+Пояснення:
+
+* `-d /test/user` — новий home;
+* `-m` — перенести вміст зі старого home в новий.
+
+Переконатися:
+
+```bash
+getent passwd user13
+```
+
+У полі домашнього каталогу має бути `/test/user`.
+
+Перевірити права:
+
+```bash
+ls -ld /test/user
+```
+
+Власник повинен бути `user13 user13`. Якщо ні:
+
+```bash
+sudo chown -R user13:user13 /test/user
+```
+
+---
+
+## 3. Які namespaces вже існують у системі
+
+### 3.1. Загальний список namespaces
+
+```bash
+sudo apt install util-linux -y    # якщо lsns раптом не встановлений
+lsns
+```
+
+Ця команда показує таблицю з колонкою `NS TYPE` (mnt, pid, uts, ipc, net, user, cgroup, time тощо).
+
+Для звіту можна зберегти у файл:
+
+```bash
+lsns > /root/namespaces.txt
+```
+
+### 3.2. Namespaces поточного процесу (приклад)
+
+```bash
+ls -l /proc/$$/ns
+```
+
+У виводі будуть симлінки `uts -> 'uts:[4026531838]'`, `mnt`, `pid` і т.д.
+
+---
+
+## 4. Запустити `htop` у власному UTS-просторі
+
+UTS namespace — це окреме «простір імен» для hostname та domainname.
+Скористаємось `unshare`.
+
+### 4.1. Встановити `htop`, якщо ще немає
+
+```bash
+sudo apt install htop -y
+```
+
+### 4.2. Запуск htop у новому UTS namespace
+
+```bash
+sudo unshare -u htop
+```
+
+Опція:
+
+* `-u` — створити новий UTS namespace для дочірнього процесу.
+
+У цьому режимі `htop` працює всередині окремого UTS-простору (hostname можна було б змінити командою `hostname newname`, якщо замість `htop` запускати shell).
+
+Для більш наочного експерименту:
+
+```bash
+sudo unshare -u /bin/bash
+hostname newuts
+htop
+```
+
+Паралельно в іншій сесії `hostname` покаже старе ім’я хоста — це доводить, що UTS-простір окремий.
+
